@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>スパイゲーム 監視モニター</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      background-color: #222;
+      color: #fff;
+      padding-top: 50px;
+      transition: background-color 0.2s;
+    }
+    button {
+      font-size: 24px;
+      padding: 15px 30px;
+      cursor: pointer;
+      border-radius: 8px;
+      border: none;
+      background-color: #007bff;
+      color: white;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    }
+    button:active {
+      transform: translateY(2px);
+    }
+    #status {
+      margin-top: 30px;
+      font-size: 20px;
+      color: #aaa;
+    }
+    /* アラート時のド派手な画面切り替え用 */
+    .alert-mode {
+      background-color: #aa0000 !important;
+      color: #fff !important;
+      font-size: 40px !important;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>スパイゲーム 監視モニター</h1>
+  <button id="connectBtn">Arduinoに接続する</button>
+  <div id="status">未接続</div>
+
+  <!-- 用意した音声ファイルを読み込む設定 -->
+  <!-- preload="auto" で事前に読み込み、遅延を防ぐ -->
+  <audio id="outSound" src="out.mp3" preload="auto"></audio>
+
+  <script>
+    let port;
+    let reader;
+
+    document.getElementById('connectBtn').addEventListener('click', async () => {
+      try {
+        // Web Serial APIでArduinoに接続
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 9600 });
+        
+        // ブラウザの仕様上、初回クリック時に音声を「空再生」して再生許可を得ておく
+        const audioElement = document.getElementById('outSound');
+        audioElement.play().then(() => {
+          audioElement.pause();
+          audioElement.currentTime = 0;
+        }).catch(err => console.log("音声再生の初期化に失敗しました", err));
+
+        document.getElementById('status').innerText = "接続完了！監視システム稼働中...";
+        document.getElementById('connectBtn').style.display = 'none';
+
+        const textDecoder = new TextDecoderStream();
+        const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+        reader = textDecoder.readable.getReader();
+
+        let buffer = "";
+
+        // Arduinoからのデータを読み込み続けるループ
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) {
+            reader.releaseLock();
+            break;
+          }
+          if (value) {
+            buffer += value;
+            // 改行ごとに分割して処理
+            let lines = buffer.split('\n');
+            buffer = lines.pop(); // 最後の未完了の行は残す
+            
+            for (let line of lines) {
+              if (line.includes("ALERT")) {
+                // アラート信号を受信した時の処理
+                const statusDiv = document.getElementById('status');
+                statusDiv.innerText = "⚠️ 侵入者検知！アウト！ ⚠️";
+                document.body.className = "alert-mode";
+                
+                // 【BGMを再生する】
+                // currentTime を 0 にして最初から再生（連続でアウトになった時用）
+                audioElement.currentTime = 0; 
+                audioElement.play();
+                
+                // 3秒後に通常画面に戻す（※BGMは最後まで鳴り続けます）
+                setTimeout(() => {
+                  statusDiv.innerText = "監視システム稼働中...";
+                  document.body.className = "";
+                }, 3000);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error(error);
+        document.getElementById('status').innerText = "接続エラー: " + error;
+      }
+    });
+  </script>
+</body>
+</html>
