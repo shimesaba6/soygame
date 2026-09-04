@@ -51,15 +51,24 @@
   <audio id="outSound" src="out.mp3" preload="auto"></audio>
 
   <script>
-    let port;
-    let reader;
+    let usbDevice;
+    let isReading = false;
 
     document.getElementById('connectBtn').addEventListener('click', async () => {
       try {
-        // Web Serial APIでArduinoに接続
-        port = await navigator.serial.requestPort();
-        await port.open({ baudRate: 9600 });
+        // CH340チップ (Vendor ID: 0x1A86) を指定してUSBデバイスを要求
+        usbDevice = await navigator.usb.requestDevice({ 
+          filters: [{ vendorId: 0x1A86 }] 
+        });
         
+        await usbDevice.open();
+        
+        // Androidで既に設定済みの場合のエラーを回避
+        if (usbDevice.configuration === null) {
+          await usbDevice.selectConfiguration(1);
+        }
+        await usbDevice.claimInterface(0);
+
         // ブラウザの仕様上、初回クリック時に音声を「空再生」して再生許可を得ておく
         const audioElement = document.getElementById('outSound');
         audioElement.play().then(() => {
@@ -67,41 +76,70 @@
           audioElement.currentTime = 0;
         }).catch(err => console.log("音声再生の初期化に失敗しました", err));
 
+        // スマホのUSB認識ラグを吸収するため少し待機
+        await new Promise(r => setTimeout(r, 200));
+
+        // 通信設定（エラーが出ても無視して次に進む関数）
+        const sendInit = async (req, val, idx) => {
+          try {
+            await usbDevice.controlTransferOut({ requestType: 'vendor', recipient: 'device', request: req, value: val, index: idx });
+          } catch(e) {
+            console.warn(`設定コマンド ${req} がOSにブロックされましたがスキップします:`, e);
+          }
+        };
+
+        // CH340の初期化と9600bps設定
+        await sendInit(0x5F, 0x0000, 0x0000);
+        await sendInit(0xA1, 0x0000, 0x0000);
+        await sendInit(0x9A, 0x1312, 0xB282); 
+        await sendInit(0xA4, 0x00FF, 0x0000);
+
         document.getElementById('status').innerText = "接続完了！監視システム稼働中...";
         document.getElementById('connectBtn').style.display = 'none';
+        isReading = true;
 
-        const textDecoder = new TextDecoderStream();
-        const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
-        reader = textDecoder.readable.getReader();
+        // データ受信ループの開始
+        readLoop(audioElement);
 
-        let buffer = "";
+      } catch (error) {
+        console.error(error);
+        document.getElementById('status').innerText = "接続エラー: " + error.name + "\n" + error.message;
+      }
+    });
 
-        // Arduinoからのデータを読み込み続けるループ
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) {
-            reader.releaseLock();
-            break;
-          }
-          if (value) {
-            buffer += value;
-            // 改行ごとに分割して処理
+    async function readLoop(audioElement) {
+      let buffer = "";
+      const endpoints = usbDevice.configuration.interfaces[0].alternate.endpoints;
+      const inEndpoint = endpoints.find(e => e.direction === 'in');
+      
+      if (!inEndpoint) {
+        document.getElementById('status').innerText = "エラー: 受信エンドポイントが見つかりません";
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      
+      while (isReading && usbDevice) {
+        try {
+          const result = await usbDevice.transferIn(inEndpoint.endpointNumber, 64);
+          
+          if (result.status === 'ok') {
+            buffer += decoder.decode(result.data);
             let lines = buffer.split('\n');
-            buffer = lines.pop(); // 最後の未完了の行は残す
+            buffer = lines.pop(); 
             
             for (let line of lines) {
+              // Arduino側から "ALERT" が送られてきたら発動
               if (line.includes("ALERT")) {
-                // アラート信号を受信した時の処理
                 const statusDiv = document.getElementById('status');
                 statusDiv.innerText = "⚠️ 侵入者検知！アウト！ ⚠️";
                 document.body.className = "alert-mode";
                 
-                // 【BGMを再生する】
-                // currentTime を 0 にして最初から再生（連続でアウトになった時用）
+                // BGMを最初から再生
                 audioElement.currentTime = 0; 
                 audioElement.play();
                 
-                // 3秒後に通常画面に戻す（※BGMは最後まで鳴り続けます）
+                // 3秒後に通常画面に戻す（BGMは鳴り続ける）
                 setTimeout(() => {
                   statusDiv.innerText = "監視システム稼働中...";
                   document.body.className = "";
@@ -109,12 +147,13 @@
               }
             }
           }
+        } catch (error) {
+          console.error("通信エラー:", error);
+          document.getElementById('status').innerText = "通信が切断されました";
+          break; 
         }
-      } catch (error) {
-        console.error(error);
-        document.getElementById('status').innerText = "接続エラー: " + error;
       }
-    });
+    }
   </script>
 </body>
 </html>
