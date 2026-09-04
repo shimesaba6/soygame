@@ -28,15 +28,38 @@
     }
     #status {
       margin-top: 30px;
-      font-size: 20px;
+      font-size: 35px;
+      font-weight: bold;
       color: #aaa;
     }
-    /* アラート時のド派手な画面切り替え用 */
-    .alert-mode {
-      background-color: #aa0000 !important;
+    
+    /* 🔵 動いてよい時（青） */
+    .safe-mode {
+      background-color: #0044aa !important;
       color: #fff !important;
-      font-size: 40px !important;
-      font-weight: bold;
+    }
+    /* 🟡 もうすぐ止まれ（黄色/オレンジの点滅） */
+    .warn-mode {
+      background-color: #aa6600 !important;
+      color: #fff !important;
+      animation: blink-warn 0.5s infinite alternate;
+    }
+    /* 🔴 止まれ・監視中（暗い赤） */
+    .stop-mode {
+      background-color: #330000 !important;
+      color: #ffcccc !important;
+    }
+    /* ⚠️ アラート時（明るい赤） */
+    .alert-mode {
+      background-color: #ff0000 !important;
+      color: #fff !important;
+      font-size: 45px !important;
+    }
+
+    /* 点滅アニメーションの定義 */
+    @keyframes blink-warn {
+      0% { background-color: #aa6600; }
+      100% { background-color: #553300; }
     }
   </style>
 </head>
@@ -46,8 +69,6 @@
   <button id="connectBtn">Arduinoに接続する</button>
   <div id="status">未接続</div>
 
-  <!-- 用意した音声ファイルを読み込む設定 -->
-  <!-- preload="auto" で事前に読み込み、遅延を防ぐ -->
   <audio id="outSound" src="out.mp3" preload="auto"></audio>
 
   <script>
@@ -56,49 +77,42 @@
 
     document.getElementById('connectBtn').addEventListener('click', async () => {
       try {
-        // CH340チップ (Vendor ID: 0x1A86) を指定してUSBデバイスを要求
         usbDevice = await navigator.usb.requestDevice({ 
           filters: [{ vendorId: 0x1A86 }] 
         });
         
         await usbDevice.open();
         
-        // Androidで既に設定済みの場合のエラーを回避
         if (usbDevice.configuration === null) {
           await usbDevice.selectConfiguration(1);
         }
         await usbDevice.claimInterface(0);
 
-        // ブラウザの仕様上、初回クリック時に音声を「空再生」して再生許可を得ておく
         const audioElement = document.getElementById('outSound');
         audioElement.play().then(() => {
           audioElement.pause();
           audioElement.currentTime = 0;
         }).catch(err => console.log("音声再生の初期化に失敗しました", err));
 
-        // スマホのUSB認識ラグを吸収するため少し待機
         await new Promise(r => setTimeout(r, 200));
 
-        // 通信設定（エラーが出ても無視して次に進む関数）
         const sendInit = async (req, val, idx) => {
           try {
             await usbDevice.controlTransferOut({ requestType: 'vendor', recipient: 'device', request: req, value: val, index: idx });
           } catch(e) {
-            console.warn(`設定コマンド ${req} がOSにブロックされましたがスキップします:`, e);
+            console.warn(`設定スキップ:`, e);
           }
         };
 
-        // CH340の初期化と9600bps設定
         await sendInit(0x5F, 0x0000, 0x0000);
         await sendInit(0xA1, 0x0000, 0x0000);
         await sendInit(0x9A, 0x1312, 0xB282); 
         await sendInit(0xA4, 0x00FF, 0x0000);
 
-        document.getElementById('status').innerText = "接続完了！監視システム稼働中...";
+        document.getElementById('status').innerText = "接続完了！システム待機中...";
         document.getElementById('connectBtn').style.display = 'none';
         isReading = true;
 
-        // データ受信ループの開始
         readLoop(audioElement);
 
       } catch (error) {
@@ -118,6 +132,7 @@
       }
 
       const decoder = new TextDecoder();
+      const statusDiv = document.getElementById('status');
       
       while (isReading && usbDevice) {
         try {
@@ -129,20 +144,31 @@
             buffer = lines.pop(); 
             
             for (let line of lines) {
-              // Arduino側から "ALERT" が送られてきたら発動
-              if (line.includes("ALERT")) {
-                const statusDiv = document.getElementById('status');
+              let data = line.trim();
+              
+              // Arduinoからの文字に応じて画面の状態を切り替える
+              if (data.includes("SAFE")) {
+                statusDiv.innerText = "🔵 動いてよし！ 🔵";
+                document.body.className = "safe-mode";
+              } 
+              else if (data.includes("WARN")) {
+                statusDiv.innerText = "🟡 止まる準備をしろ！ 🟡";
+                document.body.className = "warn-mode";
+              }
+              else if (data.includes("STOP")) {
+                statusDiv.innerText = "🔴 監視中...動くな！ 🔴";
+                document.body.className = "stop-mode";
+              }
+              else if (data.includes("ALERT")) {
                 statusDiv.innerText = "⚠️ 侵入者検知！アウト！ ⚠️";
                 document.body.className = "alert-mode";
                 
-                // BGMを最初から再生
                 audioElement.currentTime = 0; 
                 audioElement.play();
                 
-                // 3秒後に通常画面に戻す（BGMは鳴り続ける）
                 setTimeout(() => {
-                  statusDiv.innerText = "監視システム稼働中...";
-                  document.body.className = "";
+                  statusDiv.innerText = "🔴 監視中...動くな！ 🔴";
+                  document.body.className = "stop-mode";
                 }, 3000);
               }
             }
